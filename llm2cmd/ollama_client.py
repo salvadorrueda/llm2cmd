@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
 from typing import Any
 
@@ -89,6 +90,7 @@ class OllamaClient:
         self.config = config
         self._client = ollama.Client(host=config.host)
         self._mode = resolve_tool_mode(config.model, config.tool_mode)
+        self.last_timing: dict[str, Any] | None = None
 
     @property
     def mode(self) -> str:
@@ -128,6 +130,7 @@ class OllamaClient:
     # ---- Native tool-calling path ---------------------------------------
 
     def _chat_tools(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        t0 = time.perf_counter()
         try:
             response = self._client.chat(
                 model=self.config.model,
@@ -136,12 +139,15 @@ class OllamaClient:
                 options={"temperature": self.config.temperature},
             )
         except ollama.ResponseError as exc:
+            self.last_timing = {"elapsed_s": time.perf_counter() - t0}
             raise OllamaError(f"Ollama ha retornat error: {exc}") from exc
         except Exception as exc:
+            self.last_timing = {"elapsed_s": time.perf_counter() - t0}
             raise OllamaError(
                 f"No s'ha pogut connectar amb Ollama a {self.config.host}: {exc}"
             ) from exc
 
+        self.last_timing = extract_timing(response, time.perf_counter() - t0)
         message = response.get("message") if isinstance(response, dict) else response.message
         if message is None:
             raise OllamaError("Resposta d'Ollama sense camp 'message'.")
@@ -157,6 +163,7 @@ class OllamaClient:
         else:
             transformed.insert(0, {"role": "system", "content": SYSTEM_PROMPT_JSON})
 
+        t0 = time.perf_counter()
         try:
             response = self._client.chat(
                 model=self.config.model,
@@ -165,12 +172,15 @@ class OllamaClient:
                 format="json",
             )
         except ollama.ResponseError as exc:
+            self.last_timing = {"elapsed_s": time.perf_counter() - t0}
             raise OllamaError(f"Ollama ha retornat error: {exc}") from exc
         except Exception as exc:
+            self.last_timing = {"elapsed_s": time.perf_counter() - t0}
             raise OllamaError(
                 f"No s'ha pogut connectar amb Ollama a {self.config.host}: {exc}"
             ) from exc
 
+        self.last_timing = extract_timing(response, time.perf_counter() - t0)
         message = response.get("message") if isinstance(response, dict) else response.message
         if message is None:
             raise OllamaError("Resposta d'Ollama sense camp 'message'.")
@@ -180,6 +190,44 @@ class OllamaClient:
 
 
 # ---- Helpers -----------------------------------------------------------
+
+
+def extract_timing(response: Any, elapsed_s: float) -> dict[str, Any]:
+    """Extreu els temps i recompte de tokens reportats per Ollama, si existeixen.
+    `total_duration` i companys venen en nanosegons; els convertim a segons."""
+
+    def get(key: str) -> Any:
+        if isinstance(response, dict):
+            return response.get(key)
+        return getattr(response, key, None)
+
+    def ns_to_s(val: Any) -> float | None:
+        if val is None:
+            return None
+        try:
+            return float(val) / 1e9
+        except (TypeError, ValueError):
+            return None
+
+    eval_s = ns_to_s(get("eval_duration"))
+    gen_tokens = get("eval_count")
+    tps: float | None = None
+    if gen_tokens and eval_s and eval_s > 0:
+        try:
+            tps = float(gen_tokens) / eval_s
+        except (TypeError, ValueError, ZeroDivisionError):
+            tps = None
+
+    return {
+        "elapsed_s": elapsed_s,
+        "total_s": ns_to_s(get("total_duration")),
+        "load_s": ns_to_s(get("load_duration")),
+        "prompt_eval_s": ns_to_s(get("prompt_eval_duration")),
+        "eval_s": eval_s,
+        "prompt_tokens": get("prompt_eval_count"),
+        "gen_tokens": gen_tokens,
+        "tokens_per_second": tps,
+    }
 
 
 def _to_dict(message: Any) -> dict[str, Any]:

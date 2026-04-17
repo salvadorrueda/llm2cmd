@@ -1,6 +1,7 @@
 import json
 
 from llm2cmd.ollama_client import (
+    extract_timing,
     parse_json_response,
     resolve_tool_mode,
     supports_tool_calling,
@@ -68,6 +69,33 @@ def test_parse_json_response_invalid_falls_back_to_text():
 def test_parse_json_response_empty():
     msg = parse_json_response("")
     assert msg == {"role": "assistant", "content": ""}
+
+
+def test_extract_timing_full_response():
+    response = {
+        "total_duration": 2_000_000_000,        # 2s
+        "load_duration": 100_000_000,            # 0.1s
+        "prompt_eval_duration": 200_000_000,     # 0.2s
+        "prompt_eval_count": 15,
+        "eval_duration": 1_500_000_000,          # 1.5s
+        "eval_count": 60,
+    }
+    t = extract_timing(response, elapsed_s=2.05)
+    assert t["elapsed_s"] == 2.05
+    assert t["total_s"] == 2.0
+    assert t["load_s"] == 0.1
+    assert t["prompt_eval_s"] == 0.2
+    assert t["eval_s"] == 1.5
+    assert t["prompt_tokens"] == 15
+    assert t["gen_tokens"] == 60
+    assert t["tokens_per_second"] == 40.0
+
+
+def test_extract_timing_missing_fields():
+    t = extract_timing({}, elapsed_s=0.5)
+    assert t["elapsed_s"] == 0.5
+    assert t["total_s"] is None
+    assert t["tokens_per_second"] is None
 
 
 def test_transform_messages_tool_becomes_user():

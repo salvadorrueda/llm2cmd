@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from typing import Any
 
 from rich.console import Console
@@ -8,13 +10,42 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.syntax import Syntax
+from rich.table import Table
 
 from .config import Config
 from .executor import ExecutionResult, run
-from rich.table import Table
-
 from .ollama_client import OllamaClient, OllamaError
 from .tools import validate_run_shell_args
+
+try:
+    import readline  # habilita fletxes i edició per a input() a POSIX
+except ImportError:  # Windows sense pyreadline3
+    readline = None  # type: ignore[assignment]
+
+
+HISTORY_FILE = Path(
+    os.environ.get("LLM2CMD_HISTFILE", str(Path.home() / ".llm2cmd_history"))
+)
+
+
+def _setup_readline() -> None:
+    if readline is None:
+        return
+    try:
+        readline.read_history_file(HISTORY_FILE)
+    except (FileNotFoundError, OSError):
+        pass
+    readline.set_history_length(1000)
+
+
+def _save_readline() -> None:
+    if readline is None:
+        return
+    try:
+        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        readline.write_history_file(HISTORY_FILE)
+    except OSError:
+        pass
 
 
 HELP_TEXT = """**Comandes disponibles**
@@ -44,28 +75,32 @@ class Repl:
     # ---- Public loop -----------------------------------------------------
 
     def run(self) -> None:
+        _setup_readline()
         self._print_banner()
-        while True:
-            try:
-                user_input = Prompt.ask("[bold cyan]llm2cmd[/bold cyan]").strip()
-            except (EOFError, KeyboardInterrupt):
-                self.console.print()
-                return
+        try:
+            while True:
+                try:
+                    user_input = Prompt.ask("[bold cyan]llm2cmd[/bold cyan]").strip()
+                except (EOFError, KeyboardInterrupt):
+                    self.console.print()
+                    return
 
-            if not user_input:
-                continue
-
-            if user_input.startswith("/"):
-                if self._handle_meta(user_input):
+                if not user_input:
                     continue
-                return  # /exit returns False which means: stop
 
-            if user_input.startswith("!"):
-                self._execute_direct(user_input[1:])
-                continue
+                if user_input.startswith("/"):
+                    if self._handle_meta(user_input):
+                        continue
+                    return  # /exit returns False which means: stop
 
-            self.messages.append({"role": "user", "content": user_input})
-            self._process_assistant_turn()
+                if user_input.startswith("!"):
+                    self._execute_direct(user_input[1:])
+                    continue
+
+                self.messages.append({"role": "user", "content": user_input})
+                self._process_assistant_turn()
+        finally:
+            _save_readline()
 
     # ---- Meta commands ---------------------------------------------------
 
@@ -160,9 +195,11 @@ class Repl:
                 with self.console.status("[dim]Pensant...[/dim]", spinner="dots"):
                     message = self.client.chat(self.messages)
             except OllamaError as exc:
+                self._print_timing()
                 self.console.print(f"[red]{exc}[/red]")
                 return
 
+            self._print_timing()
             self.messages.append(message)
 
             tool_calls = message.get("tool_calls") or []
@@ -244,6 +281,25 @@ class Repl:
             "[bold]Executar?[/bold]", choices=["y", "n", "e"], default="n"
         )
         return choice
+
+    def _print_timing(self) -> None:
+        t = self.client.last_timing
+        if not t:
+            return
+        elapsed = t.get("elapsed_s")
+        if elapsed is None:
+            return
+        parts = [f"⏱ {elapsed:.2f}s"]
+        prompt_tok = t.get("prompt_tokens")
+        gen_tok = t.get("gen_tokens")
+        tps = t.get("tokens_per_second")
+        if prompt_tok:
+            parts.append(f"prompt: {prompt_tok} tok")
+        if gen_tok:
+            parts.append(f"gen: {gen_tok} tok")
+        if tps:
+            parts.append(f"{tps:.1f} tok/s")
+        self.console.print(f"[dim]{' · '.join(parts)}[/dim]")
 
     def _print_result(self, result: ExecutionResult) -> None:
         title = f"exit={result.returncode}"
